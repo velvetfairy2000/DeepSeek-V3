@@ -1,7 +1,7 @@
 import os
 import json
 from argparse import ArgumentParser
-from typing import List
+from typing import List, Optional
 
 import torch
 import torch.distributed as dist
@@ -33,7 +33,8 @@ def generate(
     prompt_tokens: List[List[int]],
     max_new_tokens: int,
     eos_id: int,
-    temperature: float = 1.0
+    temperature: float = 1.0,
+    prompt_embeds: Optional[torch.Tensor] = None
 ) -> List[List[int]]:
     """
     Generates new tokens based on the given prompt tokens using the specified model.
@@ -44,34 +45,54 @@ def generate(
         max_new_tokens (int): The maximum number of new tokens to generate.
         eos_id (int): The end-of-sequence token ID.
         temperature (float, optional): The temperature value for sampling. Defaults to 1.0.
+        prompt_embeds (Optional[torch.Tensor], optional): Optional input tensor of raw embeddings. Defaults to None.
 
     Returns:
         List[List[int]]: A list of lists containing the generated tokens for each sequence.
     """
     prompt_lens = [len(t) for t in prompt_tokens]
-    assert max(prompt_lens) <= model.max_seq_len, f"Prompt length exceeds model maximum sequence length (max_seq_len={model.max_seq_len})"
-    total_len = min(model.max_seq_len, max_new_tokens + max(prompt_lens))
+    embeds_len = prompt_embeds.size(1) if prompt_embeds is not None else 0
+    total_prompt_lens = [l + embeds_len for l in prompt_lens]
+    
+    assert max(total_prompt_lens) <= model.max_seq_len, f"Prompt length exceeds model maximum sequence length (max_seq_len={model.max_seq_len})"
+    total_len = min(model.max_seq_len, max_new_tokens + max(total_prompt_lens))
     tokens = torch.full((len(prompt_tokens), total_len), -1, dtype=torch.long, device="cuda")
+    
     for i, t in enumerate(prompt_tokens):
-        tokens[i, :len(t)] = torch.tensor(t, dtype=torch.long, device="cuda")
+        if len(t) > 0:
+            tokens[i, embeds_len:embeds_len+len(t)] = torch.tensor(t, dtype=torch.long, device="cuda")
+            
     prev_pos = 0
     finished = torch.tensor([False] * len(prompt_tokens), device="cuda")
     prompt_mask = tokens != -1
-    for cur_pos in range(min(prompt_lens), total_len):
-        logits = model.forward(tokens[:, prev_pos:cur_pos], prev_pos)
+    
+    for cur_pos in range(min(total_prompt_lens), total_len):
+        if prev_pos == 0 and prompt_embeds is not None:
+            text_tokens = tokens[:, embeds_len:cur_pos]
+            if text_tokens.size(1) > 0:
+                text_embeds = model.embed(text_tokens)
+            else:
+                text_embeds = torch.empty(len(prompt_tokens), 0, model.dim, device="cuda", dtype=prompt_embeds.dtype)
+            embeds = torch.cat([prompt_embeds, text_embeds], dim=1)
+            logits = model.forward(tokens[:, prev_pos:cur_pos], prev_pos, embeds=embeds)
+        else:
+            logits = model.forward(tokens[:, prev_pos:cur_pos], prev_pos)
+            
         if temperature > 0:
             next_token = sample(logits, temperature)
         else:
             next_token = logits.argmax(dim=-1)
+            
         next_token = torch.where(prompt_mask[:, cur_pos], tokens[:, cur_pos], next_token)
         tokens[:, cur_pos] = next_token
         finished |= torch.logical_and(~prompt_mask[:, cur_pos], next_token == eos_id)
         prev_pos = cur_pos
         if finished.all():
             break
+            
     completion_tokens = []
     for i, toks in enumerate(tokens.tolist()):
-        toks = toks[prompt_lens[i]:prompt_lens[i]+max_new_tokens]
+        toks = toks[total_prompt_lens[i]:total_prompt_lens[i]+max_new_tokens]
         if eos_id in toks:
             toks = toks[:toks.index(eos_id)]
         completion_tokens.append(toks)
