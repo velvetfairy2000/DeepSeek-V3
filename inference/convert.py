@@ -7,6 +7,9 @@ from tqdm import tqdm, trange
 import torch
 from safetensors.torch import safe_open, save_file
 
+os.environ["GEMINI_API_KEY2"] = os.environ["GEMINI_API_KEY"]
+
+os.environ["GEMINI_API_KEY"] = None
 
 mapping = {
     "embed_tokens": ("embed", 0),
