@@ -770,19 +770,24 @@ class Transformer(nn.Module):
         self.register_buffer("freqs_cis", precompute_freqs_cis(args), persistent=False)
 
     @torch.inference_mode()
-    def forward(self, tokens: torch.Tensor, start_pos: int = 0):
+    def forward(self, tokens: torch.Tensor, start_pos: int = 0, embeds: Optional[torch.Tensor] = None):
         """
         Forward pass for the Transformer model.
 
         Args:
             tokens (torch.Tensor): Input tensor of token IDs with shape (batch_size, seq_len).
             start_pos (int, optional): Starting position in the sequence for rotary embeddings. Defaults to 0.
+            embeds (Optional[torch.Tensor], optional): Optional input tensor of raw embeddings. Defaults to None.
 
         Returns:
             torch.Tensor: Logits tensor of shape (batch_size, vocab_size).
         """
-        seqlen = tokens.size(1)
-        h = self.embed(tokens)
+        if embeds is not None:
+            h = embeds
+            seqlen = h.size(1)
+        else:
+            seqlen = tokens.size(1)
+            h = self.embed(tokens)
         freqs_cis = self.freqs_cis[start_pos:start_pos+seqlen]
         mask = None
         if seqlen > 1:
